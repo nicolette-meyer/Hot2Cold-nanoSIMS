@@ -1,0 +1,1561 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+`---
+title: Processing Hot2Cold nanoSIMS data
+output: html_notebook
+---
+
+Load the packages required
+```{r}
+library("readxl")
+library(gridExtra)
+library(plyr) 
+library(dplyr)
+library('ggplot2')
+library('lans2r')
+library('ggtext')
+library('ggrepel') #for pie chart labels outside circle
+library('tidyverse') #for pie chart labels outside circle
+library("RColorBrewer")
+library("colorspace")
+
+
+#Colormap is to figure out the color id
+library(viridis)
+```
+
+Load the sample list
+```{r}
+path <- "/data/" ###Add file path###
+setwd(path)
+filenames = read_excel("Hot2Cold_FullSampleList_NM_081121.xlsx")
+#Note that if the ROI_r_threshold is 9999, then INTERACTIVE THRESHOLDING was used
+```
+
+Remove File_Names that have not been processed from the filenames data frame
+```{r}
+yes_no = filenames$Processed == 1
+filenames = filenames[yes_no,]
+```
+
+Making tables and lists of the  elements and isotopes
+```{r}
+#List of sites and elements
+site_list = c("MVent", "AlvRock")
+element_list = c("C2", "C", "N")
+
+#A table of the minor and major isotopes for all organisms
+isotopes = c("12C2", "12C13C", "12C", "13C", "12C14N", "12C15N")
+table_isotopes = rbind(isotopes)
+colnames(table_isotopes) = c("C2_major", "C2_minor", "C_major", "C_minor", "N_major", "N_minor")
+
+```
+
+General functions
+```{r}
+#########################################
+####Functions######
+#########################################
+func_at_perc_normal = function(major, minor) {
+  at_perc = minor/(minor+major)*100
+}
+
+func_at_perc_C2 = function(major, minor) { #different at% equation for 12C2 and 12C13C
+  at_perc = minor/(minor+2*major)*100
+}
+
+#Poisson errors for ratios. Using equations in LANS manual
+func_poisson_perc = function(major, minor) {
+  poisson_perc = (1/minor+1/major)^0.5*100
+}
+
+func_poisson_err = function(ratio, poisson_perc) {
+  poisson_err = ratio*poisson_perc/100
+}
+
+#Poisson errors just based on major count. Using equation from Anne.
+func_poisson_err_minor = function(minor) {
+  (minor^0.5)/minor
+}
+
+```
+
+Data frame of standards
+```{r}
+NA_std = data.frame(rbind(c(1.07, 1.07, 0.368)))
+colnames(NA_std) = c("C2", "C", "N")
+#Data from: https://projects.ncsu.edu/ncsu/chemistry/msf/pdf/IsotopicMass_NaturalAbundance.pdf
+```
+
+Label percentage
+```{r}
+#Assume concentration of bicarb in seawater (conc = 0.00206 M, http://ocean.stanford.edu/courses/bomc/chem/lecture_04.pdf)
+bicarb.conc.sw = 0.00206
+bicarb.label.atPerc = (0.00206*1.07+0.001*99)/(0.00206+0.001)
+
+#note that the ammonium concentration in the seawater was below the limit of detection. So the 15 at% of the label = 15N at% of the 15N-ammonium chloride chemical
+```
+
+
+Load the IRMS data for the standard and calculate at-%
+```{r}
+IRMS = read_excel("data/Fortney CDEBTray1 0417.xls", skip = 6) #Skip first 6 lines
+
+#Function to convert delta values to at-Perc for C and N
+func_delta_to_atPerc = function(delta, element) {
+  #element is either "C" or "N"
+  if (element == "C") {
+    universal_std = 0.0112372 #(PDB)
+  } else {
+    universal_std = 0.003676 #(Nair)
+  }
+  atPerc=((delta/1000+1)*universal_std)/(1+((delta/1000+1)*universal_std))*100
+  }
+  
+  #Converting delta to atPerc
+  `13C_atPerc` = func_delta_to_atPerc(IRMS$d13C, "C")
+  `15N_atPerc` = func_delta_to_atPerc(IRMS$d15N, "N")
+  
+  IRMS = cbind(IRMS, `13C_atPerc`, `15N_atPerc`)
+  
+  #Making a IRMS data table
+  summary_IRMS = data.frame(matrix(NA, nrow = 3, ncol = 10))
+  colnames(summary_IRMS) = c("C_Amount", "C_Amount_SD", "d13C", "13C_atPerc_mean", "13C_atPerc_SD", "N_Amount", "N_Amount_SD", "d15N", "15N_atPerc_mean", "15N_atPerc_SD")
+  rownames(summary_IRMS) = c("uncorr", "blank", "corr")
+  
+  #Data frame of the fixed standard (T1NA)
+  yes_no = startsWith(IRMS$`Sample ID`, "T1NA")
+  std_IRMS = IRMS[yes_no,]
+  
+  #Data frame of the blanks
+  yes_no = startsWith(IRMS$`Sample ID`, "Blank")
+  blank_IRMS = IRMS[yes_no,]
+  
+  #Calculating the mean and standard deviation isotope ratios and filling them into the summary table (summary_IRMS)
+  #NA standard, C
+  summary_IRMS$d13C[1] = mean(std_IRMS$d13C)
+  summary_IRMS$C_Amount[1] = mean(std_IRMS$`C Amount (ug)`)
+  summary_IRMS$C_Amount_SD[1] = sd(std_IRMS$`C Amount (ug)`)
+  summary_IRMS$`13C_atPerc_mean`[1] = mean(std_IRMS$`13C_atPerc`)
+  summary_IRMS$`13C_atPerc_SD`[1] = sd(std_IRMS$`13C_atPerc`)
+  
+  #NA standard, N
+  summary_IRMS$d15N[1] = mean(std_IRMS$d15N)
+  summary_IRMS$N_Amount[1] = mean(std_IRMS$`N Amount (ug)`)
+  summary_IRMS$N_Amount_SD[1] = sd(std_IRMS$`N Amount (ug)`)
+  summary_IRMS$`15N_atPerc_mean`[1] = mean(std_IRMS$`15N_atPerc`)
+  summary_IRMS$`15N_atPerc_SD`[1] = sd(std_IRMS$`15N_atPerc`)
+  
+  #blank, C
+  summary_IRMS$d13C[2] = mean(blank_IRMS$d13C)
+  summary_IRMS$C_Amount[2] = mean(blank_IRMS$`C Amount (ug)`)
+  summary_IRMS$C_Amount_SD[2] = sd(blank_IRMS$`C Amount (ug)`)
+  summary_IRMS$`13C_atPerc_mean`[2] = mean(blank_IRMS$`13C_atPerc`)
+  summary_IRMS$`13C_atPerc_SD`[2] = sd(blank_IRMS$`13C_atPerc`)
+  
+  #blank, N
+  summary_IRMS$d15N[2] = mean(blank_IRMS$d15N)
+  summary_IRMS$N_Amount[2] = mean(blank_IRMS$`N Amount (ug)`)
+  summary_IRMS$N_Amount_SD[2] = sd(blank_IRMS$`N Amount (ug)`)
+  summary_IRMS$`15N_atPerc_mean`[2] = mean(blank_IRMS$`15N_atPerc`)
+  summary_IRMS$`15N_atPerc_SD`[2] = sd(blank_IRMS$`15N_atPerc`)
+  
+  #
+  for (element.no in 0:1) { #0 for carbon, 1 for nitrogen
+    for (col.no in 1:5) {
+      index = 5*element.no+col.no #index for the correct column
+      if (col.no == 1) {
+        summary_IRMS[3, index] = summary_IRMS[1, index] - summary_IRMS[2, index] #corrected mass = mass of uncorrected standard - mass of blank
+      } else if (col.no == 2) {
+        summary_IRMS[3, index] = NA #Set the sd of the corrected mass to NA because it will be take into account later
+      } else if (col.no == 3) {
+        summary_IRMS[3, index] = (summary_IRMS[1, element.no*5+3]*summary_IRMS[1,element.no*5+1] - summary_IRMS[2, element.no*5+3]*summary_IRMS[2,element.no*5+1])/(summary_IRMS[3, element.no*5+1])     
+        #corrected delta ratio from mass balance
+      } else if (col.no == 4) {
+        summary_IRMS[3, index] = (summary_IRMS[1, element.no*5+4]*summary_IRMS[1,element.no*5+1] - summary_IRMS[2, element.no*5+4]*summary_IRMS[2,element.no*5+1])/(summary_IRMS[3, element.no*5+1])
+        #corrected at% from mass balance
+      } else if (col.no == 5) {
+        
+        #corrected at% sd. see notebook for error propagation
+        d.ratiocorr_d.ratiomeas = summary_IRMS[1,element.no*5+1]/(summary_IRMS[1,element.no*5+1]-summary_IRMS[2,element.no*5+1])
+        sd.ratio.meas = summary_IRMS[1,element.no*5+5]
+        
+        d.ratiocorr_d.ratioblank = -summary_IRMS[2,element.no*5+1]/(summary_IRMS[1,element.no*5+1]-summary_IRMS[2,element.no*5+1])
+        sd.ratio.blank = summary_IRMS[2,element.no*5+5]
+        
+        d.ratiocorr_d.massmeas = (summary_IRMS[2, element.no*5 + 4]*summary_IRMS[2, element.no*5 + 1]- summary_IRMS[1, element.no*5 + 4]* summary_IRMS[2, element.no*5 + 1])/(summary_IRMS[3, element.no*5 + 1])^2
+        sd.mass.meas = summary_IRMS[1, element.no*5+2]
+        
+        d.ratiocorr_d.massblank = (summary_IRMS[1, element.no*5 + 4]* summary_IRMS[1, element.no*5 + 1]- summary_IRMS[2, element.no*5 + 4]* summary_IRMS[1, element.no*5 + 1])/(summary_IRMS[3, element.no*5 + 1])^2
+        sd.mass.blank = summary_IRMS[2, element.no*5+2]
+        
+        summary_IRMS[3, index] = ((d.ratiocorr_d.ratiomeas*sd.ratio.meas)^2+(d.ratiocorr_d.ratioblank*sd.ratio.blank)^2+(d.ratiocorr_d.massmeas*sd.mass.meas)^2+(d.ratiocorr_d.massblank*sd.mass.blank)^2)^0.5
+      }#end of col.no for loop
+    } #end of element.no for loop
+} #end of function
+```
+
+
+Get a list of file names with the treatments you want. Used in func_treatment
+```{r}
+func_get_file.names = function(filenames, site_name, treatment, time) {
+  #If you want all variables for an argument, write NA
+  
+  if (is.na(site_name)){
+    yes_no = !is.na(filenames$Site_name)
+  } else{
+    yes_no = (filenames$Site_name == site_name) #choose only the sites
+  }
+  
+  if (is.na(treatment)){
+    yes_no2 = !is.na(filenames$Treatment)
+  } else {
+    yes_no2 = filenames$Treatment == treatment
+  }
+  
+    if (is.na(time)){
+    yes_no3 = !is.na(filenames$Time)
+  } else {
+    yes_no3 = filenames$Time == time  
+  }
+  
+  yes_no = yes_no + yes_no2 + yes_no3
+  
+  yes_no = yes_no == 3 #Vector of TRUE and FALSE if they satisfy all 3 criteria
+  yes_no = replace(yes_no, is.na(yes_no), FALSE) #Replace any NAs with FALSE
+  
+  selected.filenames <<- (filenames[yes_no,]) #List of filenames that satisfy all categories
+}
+```
+
+
+Function to extract LANS .dat files. Used in func_standard and func_treatment
+```{r}
+func_collate_data_files = function(file.name, filenames, table_isotopes) {
+    #File.name = file name to be processed. Format should be the same as the 1st column in filenames data frame
+    #Filenames = data frame with the list of all files
+    #table_isotopes = data frame of the name of the isotopes measured
+ 
+    path = paste("/data/", file.name, sep = "")
+    path = paste(path, "dat", sep = "/")
+
+    #Making new data frames for each isotope counts-z data    
+    for (isotope.no in 1:ncol(table_isotopes)) { #Cycle over all 6 isotopologues that we care about
+      path_filename = paste(path, table_isotopes[1,isotope.no], sep = "/")
+      path_filename = paste(path_filename, "z.dat", sep="-")
+      temp.table = read.table(path_filename)
+      
+      #Change the column names of the temp.table
+      ROI_list = paste("ROI", 1:(ncol(temp.table)-1), sep="_")
+      ROI_list_counts = paste(ROI_list, "counts", sep="_")
+      ROI_list_LANSpoiss = paste(ROI_list, "LANSpoiss", sep="_")
+      
+      #First column name is "Plane"
+      temp.colnames.list = rep(NA, ncol(temp.table))
+      temp.colnames.list[1] = "Plane"
+      
+      #Depending if the column is odd or even, need to choose the column name from either ROI_list_counts or  ROI_list_LANSpoiss
+      for (col.no in 2:ncol(temp.table)) {
+        if (col.no %% 2 == 0) {
+        temp.colnames.list[col.no] = ROI_list_counts[col.no/2]
+        } else {
+        temp.colnames.list[col.no] = ROI_list_LANSpoiss[(col.no-1)/2]
+        }
+      } #end of col.no for loop
+      colnames(temp.table) = temp.colnames.list
+      
+      #If plane needs to be removed, as included in the filenames excel spreadsheet, convert counts to NA for that plane
+      yes_no = filenames$File_Name == file.name
+      file.info = filenames[yes_no,]
+      
+      if (!is.na(file.info$Remove_Plane[1])) { #If the value in the Remove_Plane columns is NOT NA
+        temp.table[file.info$Remove_Plane[1],2:ncol(temp.table)] <- NA
+      }
+      
+      assign(table_isotopes[1, isotope.no], temp.table, envir = .GlobalEnv)
+    } #end of isotope for loop    
+}
+
+####To test out the function
+#func_collate_data_files(file.name = filenames[4,1], filenames = filenames, table_isotopes = table_isotopes)
+```
+
+
+Function to sum all the counts for each ROI over all planes. This is used in func_standard and func_treatment
+```{r}
+func_sum_counts_over_planes = function(data) {
+      #Remove the LANS poisson error from the data table
+      yes_no = 1:ncol(data) %% 2 == 0 #Select all even columns
+      data = data[yes_no]
+      
+      #Get a list with sum of counts for each ROI
+      data_sum = sapply(data, na.rm=TRUE, sum) #na.rm = TRUE ignores any NA in the data frame that occurred when we removed a specific plane.
+}
+```
+
+Function to get a summary table with the standards info
+```{r}
+func_standard = function(table_isotopes) {
+  
+  #########################################
+  ##############Standards##################
+  #########################################
+  #Making a summary table for the bracketing standards
+  
+  #Select only the standards in the filenames data frame
+  yes_no = filenames$Wafer_No == "Meth_std_20171008"
+  std_filenames <<- filenames[yes_no,]
+  
+  #Make 3 data frames of NAs to fill in the summary info
+  summary_std = matrix(NA, nrow=nrow(std_filenames), ncol=15)
+  colnames(summary_std) = c("File_Name", "n", "Mean_ROI_atPerc", "SD_ROI_atPerc", "Mean_ROI_PoissPerc", "Mean_ROI_PoissErr", "Sum_Major_Counts", "Sum_Minor_Counts", "Pop_atPerc", "Pop_PoissPerc", "Pop_PoissErr", "Diff_IRMS_Mean_ROI_atPerc", "Diff_IRMS_Pop_atPerc", "IRMS_SD_atPerc", "IMF")
+  summary_std = data.frame(summary_std)
+  summary_std$File_Name = std_filenames$File_Name
+  
+  summary_std_C2 <- summary_std
+  summary_std_C <- summary_std
+  summary_std_N <- summary_std
+  
+  #Cycle through the standards
+  for (file.no in 1:nrow(std_filenames)) {
+    name = std_filenames$File_Name[file.no]
+    
+  func_collate_data_files(file.name = name, filenames = std_filenames, table_isotopes = table_isotopes)
+    
+    #Making summary tables for the standards
+    for (element.no in 1:3) { #element.no = 1 for C2, element.no = 2 for C, element.no = 3 for N
+      #Get the right summary table
+      name_summary_table = paste("summary_std", element_list[element.no], sep="_")
+      temp_summary_table = get(name_summary_table)
+      
+      #Get the right major and minor isotope table
+      temp_major_table = get(table_isotopes[1, element.no*2-1])
+      temp_minor_table = get(table_isotopes[1, element.no*2])
+      
+      #Remove the LANS poisson error from the temp_major_table and temp_minor_table
+      yes_no = 1:ncol(temp_major_table) %% 2 == 0 #Select all even columns
+      temp_major_table = temp_major_table[yes_no]
+      temp_minor_table = temp_minor_table[yes_no]
+      
+      #Add the number of ROIs to the n column
+      temp_summary_table$n[file.no] = (ncol(get(table_isotopes[1,1]))-1)/2
+      
+      #################################################################
+      #Get a list with sum of counts for each ROI
+      temp_sum_ROI_major = sapply(temp_major_table, na.rm=TRUE, sum)
+      temp_sum_ROI_minor = sapply(temp_minor_table, na.rm=TRUE, sum)
+      
+      #Calculate the mean_ROI_atPerc
+      if (element.no == 1) { #Use special function to calculate atom percent for carbon
+      temp_list_ROI_atperc = func_at_perc_C2(major=temp_sum_ROI_major, minor=temp_sum_ROI_minor)
+      } else {
+      temp_list_ROI_atperc = func_at_perc_normal(major=temp_sum_ROI_major, minor=temp_sum_ROI_minor)
+      }
+      temp_summary_table$Mean_ROI_atPerc[file.no] = mean(temp_list_ROI_atperc)
+      
+      #Calculate the SD_ROI_atPerc
+      temp_summary_table$SD_ROI_atPerc[file.no] = sd(temp_list_ROI_atperc)
+      
+      #Calculate the Mean_ROI_PoissPerc
+      temp_list_ROI_PoissPerc = func_poisson_perc(major=temp_sum_ROI_major, minor=temp_sum_ROI_minor)
+      temp_summary_table$Mean_ROI_PoissPerc[file.no] = mean(temp_list_ROI_PoissPerc)
+      
+      #Calculate the Mean_ROI_PoissErr
+      temp_list_ROI_PoissErr = func_poisson_err(ratio = temp_list_ROI_atperc, poisson_perc = temp_list_ROI_PoissPerc)
+      temp_summary_table$Mean_ROI_PoissErr[file.no] = mean(temp_list_ROI_PoissErr)
+      
+      #Calculate the Sum_Major_Counts
+      temp_summary_table$Sum_Major_Counts[file.no] = sum(temp_major_table, na.rm=TRUE)
+      
+      #Calculate the Sum_Minor_Counts
+      temp_summary_table$Sum_Minor_Counts[file.no] = sum(temp_minor_table, na.rm=TRUE)
+      
+      #Calculate the population atom percent ratio
+      if (element.no == 1) { #Use special function to calculate atom percent for carbon
+        temp_summary_table$Pop_atPerc[file.no] = func_at_perc_C2(major = temp_summary_table$Sum_Major_Counts[file.no], minor=temp_summary_table$Sum_Minor_Counts[file.no])
+      } else {
+        temp_summary_table$Pop_atPerc[file.no] = func_at_perc_normal(major = temp_summary_table$Sum_Major_Counts[file.no], minor=temp_summary_table$Sum_Minor_Counts[file.no]) 
+      }
+      
+      #Calculate the population poisson percent
+      temp_summary_table$Pop_PoissPerc[file.no] = func_poisson_perc(major=temp_summary_table$Sum_Major_Counts[file.no], minor=temp_summary_table$Sum_Minor_Counts[file.no])
+      
+      #Calculate the population poisson error
+      temp_summary_table$Pop_PoissErr[file.no] = func_poisson_err(ratio=temp_summary_table$Pop_atPerc[file.no], poisson_perc = temp_summary_table$Pop_PoissPerc[file.no])
+      
+      if (element.no == 1 | element.no == 2) {
+      #######Calculate the difference between the IRMS result and the nanoSIMS result
+      #Corrected atPerc = measured atPerc + difference
+      temp_summary_table$Diff_IRMS_Mean_ROI_atPerc = summary_IRMS$`13C_atPerc_mean`[3] - temp_summary_table$Mean_ROI_atPerc
+      temp_summary_table$Diff_IRMS_Pop_atPerc = summary_IRMS$`13C_atPerc_mean`[3] - temp_summary_table$Pop_atPerc
+      temp_summary_table$IRMS_SD_atPerc = summary_IRMS$`13C_atPerc_SD`[3]
+      
+      #Calculate IMF using population at% fraction
+      temp_summary_table$IMF = ((summary_IRMS$`13C_atPerc_mean`[3]/100)/(1-summary_IRMS$`13C_atPerc_mean`[3]/100))/((temp_summary_table$Pop_atPerc/100)/(1-temp_summary_table$Pop_atPerc/100))
+      } else if (element.no == 3) {
+      temp_summary_table$Diff_IRMS_Mean_ROI_atPerc = summary_IRMS$`15N_atPerc_mean`[3] - temp_summary_table$Mean_ROI_atPerc
+      temp_summary_table$Diff_IRMS_Pop_atPerc = summary_IRMS$`15N_atPerc_mean`[3] - temp_summary_table$Pop_atPerc
+      temp_summary_table$IRMS_SD_atPerc = summary_IRMS$`15N_atPerc_SD`[3]
+      
+      #Calculate IMF using population at% fraction
+      temp_summary_table$IMF = ((summary_IRMS$`15N_atPerc_mean`[3]/100)/(1-summary_IRMS$`15N_atPerc_mean`[3]/100))/((temp_summary_table$Pop_atPerc/100)/(1-temp_summary_table$Pop_atPerc/100))
+      }
+      
+      #Assign the temporary table with the right name
+      assign(name_summary_table, temp_summary_table)
+      
+    } #end of element for loop
+  } #end of file name for loop
+  summary_std_C2 <<- summary_std_C2
+  summary_std_C <<- summary_std_C
+  summary_std_N <<- summary_std_N
+
+  
+} #end of function
+```
+
+Function to get summary data frames of a particular treatment. Used in wrapper function in next chunk.
+```{r}
+#########################################
+###############Samples###################
+#########################################
+func_treatment = function(table_isotopes, filenames, std_filenames, summary_std_C2, summary_std_C, summary_std_N, site_name, treatment, time) {
+  
+  #Select the treatments you want to target. Get a data frame of file names with only the treatments you want.
+  selected.filenames = func_get_file.names(filenames = filenames, site_name, treatment, time)
+    
+    ##############################################################################
+    ######Make empty data frames to fill in the summary of the population info####
+    ##############################################################################
+    treatment_pop_atPerc = data.frame(matrix(NA, ncol = nrow(selected.filenames), nrow = 3))
+    rownames(treatment_pop_atPerc) = c("C2", "C", "N")
+    colnames(treatment_pop_atPerc) = selected.filenames$File_Name
+    
+    treatment_pop_PoissPerc = data.frame(matrix(NA, ncol = nrow(selected.filenames), nrow = 3))
+    rownames(treatment_pop_PoissPerc) = c("C2", "C", "N")
+    colnames(treatment_pop_PoissPerc) = selected.filenames$File_Name
+    
+    treatment_pop_corr_err = data.frame(matrix(NA, ncol = nrow(selected.filenames), nrow = 3))
+    rownames(treatment_pop_corr_err) = c("C2", "C", "N")
+    colnames(treatment_pop_corr_err) = selected.filenames$File_Name
+    
+    treatment_pop_sum_major_counts = data.frame(matrix(NA, ncol = nrow(selected.filenames), nrow = 3))
+    rownames(treatment_pop_sum_major_counts) = c("C2", "C", "N")
+    colnames(treatment_pop_sum_major_counts) = selected.filenames$File_Name
+     
+    for (file.no in 1:nrow(selected.filenames)) {
+   
+      #Get data frames of the counts
+      func_collate_data_files(file.name = selected.filenames$File_Name[file.no], filenames=selected.filenames, table_isotopes=table_isotopes)
+      
+      ###########################################
+      #########Bracketing standards##############
+      ###########################################
+      
+      #Find the file information for the bracketing standards and retrieve the summary info for the bracketing stds
+      #1st bracketing std
+      yes_no = selected.filenames$Bracketing_Standard_1[file.no] == std_filenames$File_Name
+      bracketing_std_1 = std_filenames[yes_no,]
+      yes_no = summary_std_C2$File_Name == bracketing_std_1$File_Name #C2
+      bracketing_std_1_C2 = summary_std_C2[yes_no,]
+      yes_no = summary_std_C$File_Name == bracketing_std_1$File_Name #C
+      bracketing_std_1_C = summary_std_C[yes_no,]
+      yes_no = summary_std_N$File_Name == bracketing_std_1$File_Name #N
+      bracketing_std_1_N = summary_std_N[yes_no,]
+      
+      #2nd bracketing std
+      yes_no = selected.filenames$Bracketing_Standard_2[file.no] == std_filenames$File_Name
+      bracketing_std_2 = std_filenames[yes_no,]
+      yes_no = summary_std_C2$File_Name == bracketing_std_2$File_Name #C2
+      bracketing_std_2_C2 = summary_std_C2[yes_no,]
+      yes_no = summary_std_C$File_Name == bracketing_std_2$File_Name #C
+      bracketing_std_2_C = summary_std_C[yes_no,]
+      yes_no = summary_std_N$File_Name == bracketing_std_2$File_Name #N
+      bracketing_std_2_N = summary_std_N[yes_no,]
+      
+      #And if there's a 3rd bracketing std
+      if (!is.na(selected.filenames$Bracketing_Standard_3[file.no])) {
+      yes_no = selected.filenames$Bracketing_Standard_3[file.no] == std_filenames$File_Name
+      bracketing_std_3 = std_filenames[yes_no,]
+      yes_no = summary_std_C2$File_Name == bracketing_std_3$File_Name #C2
+      bracketing_std_3_C2 = summary_std_C2[yes_no,]
+      yes_no = summary_std_C$File_Name == bracketing_std_3$File_Name #C
+      bracketing_std_3_C = summary_std_C[yes_no,]
+      yes_no = summary_std_N$File_Name == bracketing_std_3$File_Name #N
+      bracketing_std_3_N = summary_std_N[yes_no,]
+      }
+      
+      #And if there's a 4th bracketing std
+      if (!is.na(selected.filenames$Bracketing_Standard_4[file.no])) {
+      yes_no = selected.filenames$Bracketing_Standard_4[file.no] == std_filenames$File_Name
+      bracketing_std_4 = std_filenames[yes_no,]
+      yes_no = summary_std_C2$File_Name == bracketing_std_4$File_Name #C2
+      bracketing_std_4_C2 = summary_std_C2[yes_no,]
+      yes_no = summary_std_C$File_Name == bracketing_std_4$File_Name #C
+      bracketing_std_4_C = summary_std_C[yes_no,]
+      yes_no = summary_std_N$File_Name == bracketing_std_4$File_Name #N
+      bracketing_std_4_N = summary_std_N[yes_no,]
+      }
+      
+      #And if there's a 5th bracketing std 
+      if (!is.na(selected.filenames$Bracketing_Standard_5[file.no])) {
+      yes_no = selected.filenames$Bracketing_Standard_5[file.no] == std_filenames$File_Name
+      bracketing_std_5 = std_filenames[yes_no,]
+      yes_no = summary_std_C2$File_Name == bracketing_std_5$File_Name #C2
+      bracketing_std_5_C2 = summary_std_C2[yes_no,]
+      yes_no = summary_std_C$File_Name == bracketing_std_5$File_Name #C
+      bracketing_std_5_C = summary_std_C[yes_no,]
+      yes_no = summary_std_N$File_Name == bracketing_std_5$File_Name #N
+      bracketing_std_5_N = summary_std_N[yes_no,]
+      }
+      
+      #Combine all bracketing standards into one data frame
+      if (is.na(selected.filenames$Bracketing_Standard_3[file.no])) { #If there are only 2 bracketing standards
+      bracketing_std_summary_C2 = rbind(bracketing_std_1_C2, bracketing_std_2_C2)
+      bracketing_std_summary_C = rbind(bracketing_std_1_C, bracketing_std_2_C)
+      bracketing_std_summary_N = rbind(bracketing_std_1_N, bracketing_std_2_N)
+      } else if (is.na(selected.filenames$Bracketing_Standard_4[file.no])) { #if there are 3 bracketing standards
+        bracketing_std_summary_C2 = rbind(bracketing_std_1_C2, bracketing_std_2_C2, bracketing_std_3_C2)
+      bracketing_std_summary_C = rbind(bracketing_std_1_C, bracketing_std_2_C, bracketing_std_3_C)
+      bracketing_std_summary_N = rbind(bracketing_std_1_N, bracketing_std_2_N, bracketing_std_3_N)
+      } else if (is.na(selected.filenames$Bracketing_Standard_5[file.no])) { #if there are 4 bracketing standards
+        bracketing_std_summary_C2 = rbind(bracketing_std_1_C2, bracketing_std_2_C2, bracketing_std_3_C2, bracketing_std_4_C2)
+      bracketing_std_summary_C = rbind(bracketing_std_1_C, bracketing_std_2_C, bracketing_std_3_C, bracketing_std_4_C)
+      bracketing_std_summary_N = rbind(bracketing_std_1_N, bracketing_std_2_N, bracketing_std_3_N, bracketing_std_4_N)
+      } else {
+      bracketing_std_summary_C2 = rbind(bracketing_std_1_C2, bracketing_std_2_C2, bracketing_std_3_C2, bracketing_std_4_C2, bracketing_std_5_C2)
+      bracketing_std_summary_C = rbind(bracketing_std_1_C, bracketing_std_2_C, bracketing_std_3_C, bracketing_std_4_C, bracketing_std_5_C)
+      bracketing_std_summary_N = rbind(bracketing_std_1_N, bracketing_std_2_N, bracketing_std_3_N, bracketing_std_4_N, bracketing_std_5_N)
+      }
+  
+      #Calculate the correction factor and SD for the bracketing std. The correction factor and sd is weighted, based on the major isotope counts. Choosing the Poisson error, NOT the Poisson %, because the poisson % is RELATIVE (like relative standard deviation)
+      brack_std_correction_table = data.frame(matrix(NA, ncol = 4, nrow = 3))
+      colnames(brack_std_correction_table) = c("mean_diff_IRMS_Pop_atPerc", "brack_std_Pop_PoissErr", "IRMS_SD_atPerc", "IMF")
+      rownames(brack_std_correction_table) = c( "C2","C", "N")
+      
+      brack_std_correction_table$mean_diff_IRMS_Pop_atPerc[1] = sum(bracketing_std_summary_C2$Diff_IRMS_Pop_atPerc*bracketing_std_summary_C2$Sum_Major_Counts/sum(bracketing_std_summary_C2$Sum_Major_Counts))
+      
+      brack_std_correction_table$mean_diff_IRMS_Pop_atPerc[2] = sum(bracketing_std_summary_C$Diff_IRMS_Pop_atPerc*bracketing_std_summary_C$Sum_Major_Counts/sum(bracketing_std_summary_C$Sum_Major_Counts))
+      
+      brack_std_correction_table$mean_diff_IRMS_Pop_atPerc[3] = sum(bracketing_std_summary_N$Diff_IRMS_Pop_atPerc*bracketing_std_summary_N$Sum_Major_Counts/sum(bracketing_std_summary_N$Sum_Major_Counts))
+      
+      ###
+      
+      brack_std_correction_table$brack_std_Pop_PoissErr[1] = sum(bracketing_std_summary_C2$Pop_PoissErr*bracketing_std_summary_C2$Sum_Major_Counts/sum(bracketing_std_summary_C2$Sum_Major_Counts))
+      
+      brack_std_correction_table$brack_std_Pop_PoissErr[2] = sum(bracketing_std_summary_C$Pop_PoissErr*bracketing_std_summary_C$Sum_Major_Counts/sum(bracketing_std_summary_C$Sum_Major_Counts))
+      
+      brack_std_correction_table$brack_std_Pop_PoissErr[3] = sum(bracketing_std_summary_N$Pop_PoissErr*bracketing_std_summary_N$Sum_Major_Counts/sum(bracketing_std_summary_N$Sum_Major_Counts))
+      
+      ###
+      brack_std_correction_table$IRMS_SD_atPerc[1] = bracketing_std_summary_C2$IRMS_SD_atPerc[1]
+      
+      brack_std_correction_table$IRMS_SD_atPerc[2] = bracketing_std_summary_C$IRMS_SD_atPerc[1]
+      
+      brack_std_correction_table$IRMS_SD_atPerc[3] = bracketing_std_summary_N$IRMS_SD_atPerc[1]
+      
+      #IMF is the mean of the bracketing standards
+       brack_std_correction_table$IMF[1] = sum(bracketing_std_summary_C2$IMF*bracketing_std_summary_C2$Sum_Major_Counts/sum(bracketing_std_summary_C2$Sum_Major_Counts))
+       
+       brack_std_correction_table$IMF[2] = sum(bracketing_std_summary_C$IMF*bracketing_std_summary_C$Sum_Major_Counts/sum(bracketing_std_summary_C$Sum_Major_Counts))
+      
+      brack_std_correction_table$IMF[3] = sum(bracketing_std_summary_N$IMF*bracketing_std_summary_N$Sum_Major_Counts/sum(bracketing_std_summary_N$Sum_Major_Counts))
+      
+      
+      ###########################################
+      ########Make lists of the sum of ROI#######
+      ###########################################
+      for (isotope.no in 1:6) {
+        temp_table = get(table_isotopes[1, isotope.no]) #Get the data from the right table
+        
+        #Sum the planes
+        data_sum = func_sum_counts_over_planes(temp_table) #use the function to sum the counts over the planes
+      
+        var_name = table_isotopes[1, isotope.no] #choose the right variable name
+        var_name_sum = paste(var_name[1], "sum", sep="_")
+        
+        assign(var_name_sum[1], data_sum)
+        
+      } #end of isotope for loop
+      
+      for (element.no in 1:3) {
+      #######################################################################################
+      #Calculate the isotope ratios for individual ROIs & correct for the bracketing standard
+      #######################################################################################
+      var_name_major = table_isotopes[1, element.no*2-1] #Get the variable name for the major isotope
+      var_name_minor = table_isotopes[1, element.no*2] #Get the variable name for the minor isotope
+      
+      #Get the data for major and minor isotopes, summed over the whole acquisition
+      var_name_major_sum = paste(var_name_major[1], "sum", sep="_")
+      var_name_minor_sum = paste(var_name_minor[1], "sum", sep="_")
+      
+      temp_ROI_sum_major = get(var_name_major_sum)
+      temp_ROI_sum_minor = get(var_name_minor_sum)
+      
+      #calculating the ROI at-Perc
+      if (element.no ==1) { 
+        temp_ROI_atPerc = func_at_perc_C2(major = temp_ROI_sum_major, minor = temp_ROI_sum_minor)
+      } else {
+        temp_ROI_atPerc = func_at_perc_normal(major = temp_ROI_sum_major, minor = temp_ROI_sum_minor)  
+      }
+      
+      #Correcting each individual ROI for IMF using the bracketing standard. Only for C and N
+      if (element.no !=3) { #Only for C and N.
+        temp_ROI_atPerc =( (brack_std_correction_table$IMF[element.no]*(temp_ROI_atPerc/100)/(1-temp_ROI_atPerc/100))/(1+brack_std_correction_table$IMF[element.no]*(temp_ROI_atPerc/100)/(1-temp_ROI_atPerc/100)))*100
+      }
+      
+      #Saving the ROI's that have been corrected using IMF
+      var_name_ROI_atPerc = paste(element_list[element.no], "corr_ROI_atPerc", sep="_")
+      assign(var_name_ROI_atPerc, temp_ROI_atPerc) #e.g. "C_corr_ROI_atPerc"
+      
+      #ERRORS
+      #######
+      #Calculating the Poisson errors using the LANS formulae. These errors are just for the sample measurement, and don't take into account any errors from the bracketing standards
+      temp_ROI_PoissPerc = func_poisson_perc(major = temp_ROI_sum_major, minor = temp_ROI_sum_minor)
+      temp_ROI_PoissErr = func_poisson_err(ratio = temp_ROI_atPerc, poisson_perc = temp_ROI_PoissPerc)
+      
+      #Assign the LANS error table with it's correct name
+      var_name_ROI_atPerc_error = paste(element_list[element.no], "corr_ROI_atPerc_error", sep="_") #e.g. "C_corr_ROI_atPerc_error"
+      assign(var_name_ROI_atPerc_error, temp_ROI_PoissErr)
+      
+      ######
+      #Calculating the Poisson errors using the formulae in Parada et al., 2019
+      temp_ROI_PoissErr_minor = func_poisson_err_minor(minor= temp_ROI_sum_minor)
+
+      #Assign the AEP error table with it's correct name
+      var_name_ROI_atPerc_error_minor = paste(element_list[element.no], "corr_ROI_atPerc_error_minor", sep="_") 
+      assign(var_name_ROI_atPerc_error_minor, temp_ROI_PoissErr_minor)
+      
+      #COLLATING THE ROI'S FROM DIFFERENT ACQUISITIONS INTO 1 DATA FRAME
+      ######
+      #Collate all the ROI data for all treatments into 1 data frame  
+      var_name_ROI_atPerc_treatment = paste(var_name_ROI_atPerc, "treatment", sep="_")
+      var_name_ROI_atPerc_error_treatment = paste(var_name_ROI_atPerc_error, "treatment", sep="_")
+      var_name_ROI_atPerc_error_minor_treatment = paste(var_name_ROI_atPerc_error_minor, "treatment", sep="_")
+      
+      #Treat the first file differently from the rest.
+      if (file.no ==1) {
+        assign(var_name_ROI_atPerc_treatment, temp_ROI_atPerc) #ROI list
+        assign(var_name_ROI_atPerc_error_treatment, temp_ROI_PoissErr) #LANS Poisson error
+        assign(var_name_ROI_atPerc_error_minor_treatment, temp_ROI_PoissErr_minor) #AEP Poisson error
+      } else {
+        #ROI list
+        temp_ROI_atPerc_treatment = get(var_name_ROI_atPerc_treatment)
+        temp_ROI_atPerc_treatment = c(temp_ROI_atPerc_treatment, temp_ROI_atPerc)
+        assign(var_name_ROI_atPerc_treatment, temp_ROI_atPerc_treatment)
+        
+        #LANS Poisson Error
+        temp_ROI_atPerc_error_treatment = get(var_name_ROI_atPerc_error_treatment)
+        temp_ROI_atPerc_error_treatment = c(temp_ROI_atPerc_error_treatment, temp_ROI_PoissErr)
+        assign(var_name_ROI_atPerc_error_treatment, temp_ROI_atPerc_error_treatment)
+        
+        #AEP Poisson Error
+        temp_ROI_atPerc_error_minor_treatment = get(var_name_ROI_atPerc_error_minor_treatment)
+        temp_ROI_atPerc_error_minor_treatment = c(temp_ROI_atPerc_error_minor_treatment, temp_ROI_PoissErr_minor)
+        assign(var_name_ROI_atPerc_error_minor_treatment, temp_ROI_atPerc_error_minor_treatment)
+      } #end of if else statement
+      } #end of element.no for loop 
+    } #end of file.no for loop
+    
+    #######################################
+    #Make a summary table for the ROI data#
+    #######################################
+      
+  #Make an empty data frame to fill in the ROI summary information
+  treatment_ROI_summary = data.frame(matrix(NA, ncol = 4, nrow = 3))
+  colnames(treatment_ROI_summary) = c("mean_ROI_atPerc", "n", "mean_ROI_error", "sd_ROI_atPerc_")
+  rownames(treatment_ROI_summary) = c("C2", "C", "N")
+  
+  #Fill in the summary table
+  for (element.no in 1:3) {
+    var_name = paste(element_list[element.no], "corr_ROI_atPerc_treatment", sep = "_")
+    var_name_error = paste(element_list[element.no], "corr_ROI_atPerc_error_treatment", sep = "_")
+    
+    temp_ROI_atPerc = get(var_name)
+    temp_ROI_atPerc_error = get(var_name_error)
+    
+    treatment_ROI_summary[element.no,1] = mean(temp_ROI_atPerc)
+    treatment_ROI_summary[element.no,2] = length(temp_ROI_atPerc)
+    treatment_ROI_summary[element.no,3] = mean(temp_ROI_atPerc_error)
+    treatment_ROI_summary[element.no,4] = sd(temp_ROI_atPerc)
+  }  #end of element.no for loop
+  
+  var_name_treatment = paste(site_name, treatment, time, sep = ".")
+
+  var_name = paste(var_name_treatment, "ROI_summary", sep = ".")
+  assign(var_name, treatment_ROI_summary, envir = .GlobalEnv)
+  
+  ##############################
+  #REMOVING ROIs ACCORDING TO PE
+  ##############################
+  #Make a new list that only includes ROI's that have a Poisson Error (using AEP formula, not LANS) that is <0.1
+  #For t0 and ammonium+bicarb, both the C2 and N ions need to be <0.1 to stay.
+    #AEP Poisson Error
+    var_name = paste(var_name_treatment, "ROI.list.error.minor", element_list[element.no], sep = ".")
+    temp_ROI_error_minor_list_C2 = get(paste(element_list[1], "corr_ROI_atPerc_error_minor_treatment", sep = "_"))
+    temp_ROI_error_minor_list_N = get(paste(element_list[3], "corr_ROI_atPerc_error_minor_treatment", sep = "_"))
+    
+      temp_list = temp_ROI_error_minor_list_C2
+      temp_list[temp_list>0.1] = NA #if the error is greater than 0.1, set the error to NA
+      temp_list[!is.na(temp_list)] = 1 #if the error is smaller than or equal to 0.1, set the error to 1
+      
+    if (!grepl(var_name_treatment, "acet")) { #if the treatment variable name does not contains "acet" 
+      temp_list2 = temp_ROI_error_minor_list_N 
+      temp_list2[temp_list2>0.1] = NA #if the error is greater than 0.1, set the error to NA
+      temp_list2[!is.na(temp_list2)] = 1 #if the error is smaller than or equal to 0.1, set the error to 1
+      
+      temp_list = temp_list*temp_list2 #if the C2 OR N error is greater than 0.1, it will be NA.
+    } #end of grepl statement
+    
+  for (element.no in 1:3) {
+    #ROI list
+    var_name = paste(var_name_treatment, "ROI.list.atPerc", element_list[element.no], sep = ".")
+    temp_ROI_list = get(paste(element_list[element.no], "corr_ROI_atPerc_treatment", sep = "_"))
+    
+    #Remove the ROIs that have been identified, having a PE greater than 0.1
+    temp_ROI_list = temp_ROI_list * temp_list
+    assign(paste(var_name_treatment, "ROI.list.atPerc.highPEremoved", element_list[element.no], sep = "."), temp_ROI_list)
+  }#element.no for loop
+  
+  #Save the ROI list in the global environment. These ROI's have been corrected for IMF
+  for (element.no in 1:3) {
+    #ROI list
+    var_name = paste(var_name_treatment, "ROI.list.atPerc", element_list[element.no], sep = ".")
+    assign(var_name[1], get(paste(element_list[element.no], "corr_ROI_atPerc_treatment", sep = "_")) , envir = .GlobalEnv)
+    
+    #LANS Poisson Error
+    var_name = paste(var_name_treatment, "ROI.list.error", element_list[element.no], sep = ".")
+    assign(var_name[1], get(paste(element_list[element.no], "corr_ROI_atPerc_error_treatment", sep = "_")) , envir = .GlobalEnv)
+    
+    #AEP Poisson Error
+    var_name = paste(var_name_treatment, "ROI.list.error.minor", element_list[element.no], sep = ".")
+    assign(var_name[1], get(paste(element_list[element.no], "corr_ROI_atPerc_error_minor_treatment", sep = "_")) , envir = .GlobalEnv)
+    
+    #The list of ROIs with the low PE removed
+    var_name = paste(var_name_treatment, "ROI.list.atPerc.highPEremoved", element_list[element.no], sep = ".")
+    assign(var_name, get(var_name),envir = .GlobalEnv)
+    write.csv(data.frame(get(var_name)), paste0(var_name, ".csv"))
+    
+  } #end of element.no for loop
+} #end of function    
+```
+
+Wrapper function to be used for func_treatment
+```{r}
+func_wrapper_treatment = function(treatment_scheme, table_isotopes, filenames, std_filenames, summary_std_C2, summary_std_C, summary_std_N) {
+  for (treatment.no in 1:nrow(treatment_scheme)) {
+    site_name = treatment_scheme$site_name[treatment.no]
+    treatment = treatment_scheme$treatment[treatment.no]
+    time = treatment_scheme$time[treatment.no]
+
+  func_treatment(table_isotopes = table_isotopes, filenames = filenames, std_filenames = std_filenames, summary_std_C2 = summary_std_C2, summary_std_C = summary_std_C, summary_std_N = summary_std_N, site_name=site_name, treatment=treatment, time=time)
+
+  } #end of treatment.no for loop
+}
+```
+
+Function to make boxplots. Used in func_wrapper_barplots
+```{r}
+yaxis_max_limits = rbind(c(3, 3, 3))
+y_axis_sample_size = 2.8
+#atPerc_label = rbind(c("13C2 at%", "13C at%", "15N at%"))
+atPerc_label = c(expression(""^"13"*"C"*" at%"),
+                 expression(""^"13"*"C"*" at%"),
+                 expression(""^"15"*"N"*" at%"))
+subplot_title = c(expression("Carbon-C"["2"]),
+                  "Carbon-C",
+                  "Nitrogen")
+
+func_boxplot = function(data, xaxis_labels, element.no, xaxis) { #xaxis_labels needs to be in the right order that you want the treatments to be displayed in
+  
+    #Making a table for the sample size annotation at the bottom of the plot
+    #for some reason, count() isn't working. :(
+  x_axis_variable_list = unique(data$x_axis_variable)
+  temp_sample_size = data.frame(sample_size = rep(NA, length(x_axis_variable_list)))
+
+    for (variable.no in 1:length(x_axis_variable_list)) {
+    yes_no = data$x_axis_variable == x_axis_variable_list[variable.no] #which data correspond to the variable
+    yes_no2 = !is.na(data$atPerc)
+    temp_sample_size[variable.no,1] =  sum(yes_no*yes_no2, na.rm=TRUE)
+  }
+    #temp_sample_size = count(data$x_axis_variable)
+  
+  sample_size = data.frame(x_axis_variable=x_axis_variable_list,
+                         sample_size=temp_sample_size)
+  
+  #Convert the x axis variables to characters
+  data$x_axis_variable = as.character(data$x_axis_variable)
+  
+  #Make the box plot
+  p = ggplot(data) + 
+      geom_boxplot(aes(x=x_axis_variable, y=atPerc, fill=x_axis_variable), width = 0.3, outlier.size = 0.3, show.legend = FALSE) +
+      scale_x_discrete(limits = factor(xaxis_labels), name = "") +
+      scale_y_continuous(limits = c(0, yaxis_max_limits[1, element.no]), name = atPerc_label[element.no], expand = c(0, 0)) +
+      labs(title = subplot_title[element.no]) +
+      theme_bw() + theme(panel.border = element_blank(), 
+                         panel.grid.major = element_blank(),
+                        panel.grid.minor = element_blank(),
+                        axis.line = element_line(colour = "black")) +
+      #scale_fill_manual(values=palette) +
+      geom_jitter(aes(x=x_axis_variable, y=atPerc), shape=16, position=position_jitter(0.1), color="gray", alpha = 0.5, size = 0.5) +
+      theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=12,face="bold")) +
+    # theme(axis.text=element_text(size=12), axis.title=element_text(size=14,face="bold")) for presentations
+      theme(plot.title = element_text(size=22, face="bold")) +
+      annotate("text", x = as.character(xaxis_labels), y = y_axis_sample_size, label = sample_size$sample_size)
+}  
+
+
+```
+
+Use wrapper function to plot the box and whisker plots
+Going to only plot ROI's that have P.E. smaller than or equal to 0.1
+```{r}
+func_wrappper_boxplot = function(treatment_scheme, xaxis, main_title1, main_title2, comparison) {
+  for (element.no in 1:3) {
+    for (treatment.no in 1:nrow(treatment_scheme)) {
+    var_name = paste(treatment_scheme$site_name[treatment.no], treatment_scheme$treatment[treatment.no], treatment_scheme$time[treatment.no], "ROI.list.atPerc.highPEremoved", element_list[element.no], sep=".")
+    temp_ROI_list = get(var_name)
+    temp_ROI_table = data.frame(temp_ROI_list)
+    yes_no = colnames(treatment_scheme) == xaxis
+    target_col_no = which(yes_no) #Choose which column index is TRUE
+    treatment_list = data.frame(matrix(treatment_scheme[treatment.no, target_col_no], ncol = 1, nrow = nrow(temp_ROI_table)))
+    colnames(treatment_list) = "x_axis_variable"
+    
+    temp_ROI_table = cbind(temp_ROI_table, treatment_list)
+    colnames(temp_ROI_table) = c("atPerc", "x_axis_variable")
+    
+    if (treatment.no == 1) {
+      table_4_plotting = temp_ROI_table
+    } else {
+      table_4_plotting = rbind(table_4_plotting, temp_ROI_table)
+    }
+    }#end treatment.no for loop
+    
+    table_4_plotting$x_axis_variable = as.character(table_4_plotting$x_axis_variable) #Convert the treatment column into characters instead of a list
+    figure_name = paste("p", element.no, sep = "") #make a figure variable name
+    
+    xaxis_labels = c(as.matrix(treatment_scheme[,target_col_no])) #To convert from data frame to a vector, need to first convert to a matrix!!! This will help the x axis to be in the order that we want
+
+    main_title = paste(treatment_scheme[2,which(colnames(treatment_scheme)==main_title1)], treatment_scheme[2,which(colnames(treatment_scheme)==main_title2)], sep = ", ") #making a main title for the plot, according to maintitle1 and maintitle2 variables
+    
+    #using the plotting function to make the plot
+    p = func_boxplot(data = table_4_plotting, xaxis_labels = xaxis_labels, element.no = element.no, xaxis=xaxis)
+    assign(figure_name, p)
+    
+  }#end of element.no for loop
+  
+  #Save the plots as a pdf.
+  target_col_no1 = which(colnames(treatment_scheme)==main_title1)
+  target_col_no2 = which(colnames(treatment_scheme)==main_title2)
+  
+  ################
+  #Box and whisker
+  ################
+  var_name_treatment = paste(treatment_scheme[1,target_col_no1], treatment_scheme[2,target_col_no2], paste("compare", comparison, sep="_"), "boxwhisker", sep = ".")
+  
+  #For the C and N plot in the final publication
+  temp.file.name = paste(var_name_treatment, "wider", "pdf", sep=".")
+  pdf(temp.file.name, width=10, height=3.5, useDingbats=FALSE)   #pdf(temp.file.name, width=15, height=8) for presentations
+  grid.arrange(p1, p2, p3, ncol = 3, nrow = 1, top = main_title)
+  dev.off()
+  
+  
+} #end of function
+```
+
+Test for significant differences in mean between treatments (MannWhitney test, i.e. in R called the Wilcox test)
+```{r}
+func_MannWhitney = function(table_isotopes, treatment_scheme, comparison, main_title1, main_title2) {
+
+  MannWhitney = data.frame(matrix(NA, nrow=nrow(treatment_scheme)-1, ncol=nrow(treatment_scheme)-1))
+  rownames(MannWhitney) = paste(treatment_scheme$site_name[1:(nrow(treatment_scheme)-1)], treatment_scheme$treatment[1:(nrow(treatment_scheme)-1)], treatment_scheme$time[1:(nrow(treatment_scheme)-1)], sep=".")
+  col.index = 1:ncol(MannWhitney)
+  colnames(MannWhitney) = paste(treatment_scheme$site_name[2:(nrow(treatment_scheme))], treatment_scheme$treatment[2:(nrow(treatment_scheme))], treatment_scheme$time[2:(nrow(treatment_scheme))], sep=".")
+  
+  #Making empty data frames for all 3 elements
+  for (element.no in 1:3) {
+    #ROI
+    var_name_MannWhitney = paste("MannWhitney", element_list[element.no], sep = "_")
+    assign(var_name_MannWhitney, MannWhitney)
+
+  #Filling in the Mann Whitney table
+    #Get the data frame with the atPerc data
+    var_name_MannWhitney = paste("MannWhitney", element_list[element.no], sep = "_")
+    temp_MannWhitney = get(var_name_MannWhitney)
+    
+    for (r in 1:nrow(temp_MannWhitney)) {
+      var_name_row = paste(rownames(temp_MannWhitney)[r], "ROI.list.atPerc.highPEremoved", element_list[element.no], sep=".")
+      
+      df_row = get(var_name_row)
+      
+      for (c in 1:ncol(temp_MannWhitney)) {
+        var_name_col = paste(colnames(temp_MannWhitney)[c], "ROI.list.atPerc.highPEremoved", element_list[element.no], sep=".")
+        
+        df_col = get(var_name_col)
+        
+        # independent 2-group Mann-Whitney U Test
+        result = wilcox.test(df_row,df_col, alternative = "two.sided")
+        #null hypothesis H0= the distributions of both populations are equal
+        #The alternative hypothesis H1 = the distributions are not equal
+        
+        temp_MannWhitney[r,c] = result$p.value
+      }#end of c loop
+    }#end of r loop
+    
+    #Save the table as a csv
+    target_col_no1 = which(colnames(treatment_scheme)==main_title1)
+    target_col_no2 = which(colnames(treatment_scheme)==main_title2)
+    
+    var_name_treatment = paste(treatment_scheme[1,target_col_no1], treatment_scheme[2,target_col_no2], paste("compare", comparison, sep="_"), element_list[element.no], "MannWhitney", sep = ".")
+    assign(var_name_treatment, temp_MannWhitney, envir = .GlobalEnv)
+    var_name_treatment = paste(var_name_treatment, "csv", sep = ".")
+    write.csv(temp_MannWhitney, file = var_name_treatment) #Print csv spreadsheet
+    
+  } #end of element.no for loop
+} #end of function
+```
+
+
+
+Overall wrapper function. Process the standard SEPARATELY
+```{r}
+func_overall_wrapper = function(treatment_scheme, table_isotopes, filenames, std_filenames, summary_std_C2, summary_std_C, summary_std_N, xaxis, main_title1, main_title2, comparison) {
+  
+  #Wrapper function to get summary data tables for the treatment
+  func_wrapper_treatment(treatment_scheme = treatment_scheme, table_isotopes = table_isotopes, filenames = filenames, std_filenames = std_filenames, summary_std_C2 = summary_std_C2,summary_std_C = summary_std_C, summary_std_N = summary_std_N)
+  
+  #Wrapper function to make a bar plot
+  #Plotting only the ROI's that have a PE <0.1
+  func_wrappper_boxplot(treatment_scheme=treatment_scheme, xaxis=xaxis, main_title1 = main_title1, main_title2 = main_title2, comparison = comparison)
+  
+  #Function to calculate the Mann Whitney p values
+  func_MannWhitney(table_isotopes=table_isotopes, treatment_scheme=treatment_scheme, main_title1 = main_title1, main_title2 = main_title2, comparison=comparison)
+}
+```
+
+
+Processing the data for Mvent
+```{r}
+################
+#Error messages#
+################
+#File name in the filenames spreadsheet is not correct. Go to the excel spreadsheet to change it.
+  #Error in file(file, "rt") : cannot open the connection
+  #In addition: Warning message:
+  #In file(file, "rt") :
+
+#Either you have NAs in your data set or the y axis does not encompass all the data
+  #Warning messages:
+  #1: Removed 11 rows containing non-finite values (stat_boxplot). 
+  #2: Removed 11 rows containing missing values (geom_point). 
+
+#Process the standards
+func_standard(table_isotopes = table_isotopes)
+
+#############
+#Mvent, amm_bicarb, all time points#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_MVent_ammbicarb_allT_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="time",
+                     main_title1 = "site_name",
+                     main_title2 = "treatment",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "time")
+
+#############
+#Mvent, acet, all time points#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_MVent_acet_allT_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="time",
+                     main_title1 = "site_name",
+                     main_title2 = "treatment",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "time")
+
+#############
+#Mvent, amm_bicarb and acet, t=2#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_MVent_t2_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="treatment",
+                     main_title1 = "site_name",
+                     main_title2 = "time",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "treatment")
+
+#############
+#Mvent, amm_bicarb and acet, t=7#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_MVent_t7_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="treatment",
+                     main_title1 = "site_name",
+                     main_title2 = "time",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "treatment")
+```
+
+
+
+Processing the data for AlvRock
+```{r}
+#############
+#AlvRock, amm_bicarb, all time points#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_AlvRock_ammbicarb_allT_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="time",
+                     main_title1 = "site_name",
+                     main_title2 = "treatment",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "time")
+
+#############
+#AlvRock, acet, all time points#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_AlvRock_acet_allT_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="time",
+                     main_title1 = "site_name",
+                     main_title2 = "treatment",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "time")
+
+#############
+#AlvRock, amm_bicarb and acet, t=2#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_AlvRock_t2_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="treatment",
+                     main_title1 = "site_name",
+                     main_title2 = "time",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "treatment")
+
+#############
+#AlvRock, amm_bicarb and acet, t=7#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_AlvRock_t7_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="treatment",
+                     main_title1 = "site_name",
+                     main_title2 = "time",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "treatment")
+```
+
+
+
+Comparing AlvRock vs Mvent
+```{r}
+#############
+#AlvRock and Mvent, amm_bicarb, t2#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_allSites_ammbicarb_t2_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="site_name",
+                     main_title1 = "treatment",
+                     main_title2 = "time",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "site")
+
+#############
+#AlvRock and Mvent, amm_bicarb, t7#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_allSites_ammbicarb_t7_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="site_name",
+                     main_title1 = "treatment",
+                     main_title2 = "time",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "site")
+
+#############
+#AlvRock and Mvent, acet, t2#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_allSites_acet_t2_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="site_name",
+                     main_title1 = "treatment",
+                     main_title2 = "time",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "site")
+
+#############
+#AlvRock and Mvent, acet, t7#
+#############
+#Load the treatment scheme
+treatment_scheme = read_excel("/treatment_schemes/TreatmentScheme_allSites_acet_t7_NM_101121.xlsx")
+
+#Wrapper function
+func_overall_wrapper(treatment_scheme=treatment_scheme,
+                     xaxis="site_name",
+                     main_title1 = "treatment",
+                     main_title2 = "time",
+                     table_isotopes = table_isotopes,
+                     filenames = filenames,
+                     std_filenames = std_filenames,
+                     summary_std_C2 = summary_std_C2,
+                     summary_std_C = summary_std_C,
+                     summary_std_N = summary_std_N,
+                     comparison = "site")
+```
+
+
+
+
+Function to plot C vs N for amm + bicarb in at%
+```{r}
+func_CvsN = function(C2_data, N_data, label) {
+  #The C2_data and N_data need to be the ROI list
+  #Label is title for plot
+
+  temp_df = data.frame(C2_atPerc = C2_data,
+                  N_atPerc = N_data)
+  
+  rownames(temp_df) = paste("ROI_", 1:length(C2_data), sep="")
+  
+  #Calculating the slope of the reference lines
+  one_to_one_slope = 0.368/1.07
+  two_to_one_slope = one_to_one_slope*2
+  
+  #Scatter plot of Cat% vs Nat%  
+  p = ggplot(data = temp_df) +
+      geom_abline(slope = one_to_one_slope, intercept = 0, color = "lightgrey") +
+      geom_abline(slope = two_to_one_slope, intercept = 0, color = "lightgrey") +
+      geom_point(aes(x=C2_atPerc, y=N_atPerc), shape=1) +
+      theme_bw() +
+      scale_x_continuous (name = "C at%", limits=c(0,3)) +
+      scale_y_continuous(name = "N at%", limits=c(0,3)) +
+      theme(panel.grid.major.x = element_blank(),
+            panel.grid.major.y = element_blank(),
+            panel.grid.minor.x = element_blank(),
+            panel.grid.minor.y = element_blank(),
+            axis.text=element_text(size=12),
+            axis.title=element_text(size=14,face="bold"),
+            plot.title = element_text(size=22, face="bold")) + 
+      ggtitle(label)
+  p
+  
+  #Save as pdf
+  ggsave(plot=p, height=4.5, width=4.5, filename=paste(label, "CvsN_scatter.pdf", sep="_"), useDingbats=FALSE)
+}
+```
+
+
+
+Using the function to plot C vs N for amm + bicarb in at%
+```{r}
+#Mvent, t=2
+func_CvsN(C2_data = Mvent.amm_bicarb.2.ROI.list.atPerc.highPEremoved.C2, N_data=Mvent.amm_bicarb.2.ROI.list.atPerc.highPEremoved.N, label="Mvent_t2_removedROIsbyPE")
+func_CvsN(C2_data = Mvent.amm_bicarb.2.ROI.list.atPerc.C2, N_data=Mvent.amm_bicarb.2.ROI.list.atPerc.N, label="Mvent_t2")
+
+#Mvent, t=7
+func_CvsN(C2_data = Mvent.amm_bicarb.7.ROI.list.atPerc.highPEremoved.C2, N_data=Mvent.amm_bicarb.7.ROI.list.atPerc.highPEremoved.N, label="Mvent_t7_removedROIsbyPE")
+func_CvsN(C2_data = Mvent.amm_bicarb.7.ROI.list.atPerc.C2, N_data=Mvent.amm_bicarb.7.ROI.list.atPerc.N, label="Mvent_t7")
+
+#AlvRock, t=2
+func_CvsN(C2_data = AlvRock.amm_bicarb.2.ROI.list.atPerc.highPEremoved.C2, N_data=AlvRock.amm_bicarb.2.ROI.list.atPerc.highPEremoved.N, label="AlvRock_t2_removedROIsbyPE")
+func_CvsN(C2_data = AlvRock.amm_bicarb.2.ROI.list.atPerc.C2, N_data=AlvRock.amm_bicarb.2.ROI.list.atPerc.N, label="AlvRock_t2")
+
+#AlvRock, t=2
+func_CvsN(C2_data = AlvRock.amm_bicarb.7.ROI.list.atPerc.highPEremoved.C2, N_data=AlvRock.amm_bicarb.7.ROI.list.atPerc.highPEremoved.N, label="AlvRock_t7_removedROIsbyPE")
+func_CvsN(C2_data = AlvRock.amm_bicarb.7.ROI.list.atPerc.C2, N_data=AlvRock.amm_bicarb.7.ROI.list.atPerc.N, label="AlvRock_t7")
+```
+
+Function to plot Cnet vs Nnet for amm + bicarb in at%
+```{r}
+func_CnetVsNnet = function(C2_data_tf, N_data_tf, C2_data_t0, N_data_t0, label, C2_atPerc_add, N_atPerc_add, x_lim, y_lim) {
+  #The C2_data_f and N_data_f need to be the ROI list
+  #Label is title for plot
+
+  temp_df = data.frame(C2_net = C2_data_tf,
+                  N_net = NA)
+  
+  #calculate Cnet and Nnet
+  temp_df= data.frame(C2_net = (C2_data_tf-mean(C2_data_t0, na.rm=TRUE))/(C2_atPerc_add-mean(C2_data_t0, na.rm=TRUE))*100,
+  
+                      N_net = (N_data_tf-mean(N_data_t0, na.rm=TRUE))/(N_atPerc_add-mean(N_data_t0, na.rm=TRUE))*100
+  )
+  
+  rownames(temp_df) = paste("ROI_", 1:length(C2_data_tf), sep="")
+  
+  #Remove ROI's by PE
+  temp_df = temp_df[!is.na(temp_df$C2_net),]
+  
+
+  #Calculating the slope of the reference lines
+  one_to_one_slope = 1
+  two_to_one_slope = 2
+  
+  #Calculate the LOD
+  C2_LOD= (3*sd(C2_data_t0, na.rm=TRUE))/(C2_atPerc_add-mean(C2_data_t0, na.rm=TRUE))*100
+  N_LOD = (3*sd(N_data_t0, na.rm=TRUE))/(N_atPerc_add-mean(N_data_t0, na.rm=TRUE))*100
+  
+  #Make a data frame for the area
+  triangles = data.frame(x = c(-C2_LOD, C2_LOD, C2_LOD, -C2_LOD, #Heterotrophy
+                               C2_LOD, y_lim/2, C2_LOD, #mostly heterotrophy
+                               C2_LOD, x_lim, x_lim, y_lim/2, C2_LOD, #mostly autotrophy
+                               C2_LOD, x_lim, x_lim, C2_LOD,#autotrophy
+                               -C2_LOD, C2_LOD, C2_LOD, -C2_LOD),  
+                         y = c(N_LOD, N_LOD, y_lim, y_lim, #Heterotrophy
+                               2*C2_LOD, y_lim, y_lim, #mostly heterotrophy
+                               C2_LOD, x_lim, y_lim, y_lim, C2_LOD*2, #mostly autotrophy
+                               -N_LOD, -N_LOD, x_lim, C2_LOD,  #autotrophy
+                               -N_LOD, -N_LOD, N_LOD, N_LOD),
+                         t = c(rep("1_heterotrophy", 4), rep("2_mostly_heterotrophy",3), rep("3_mostly_autotrophy", 5), rep("4_autotrophy",4), rep("5_not_enriched", 4))
+  )
+  
+  
+  #Scatter plot of Cnet% vs Nnet%  
+  p = ggplot() +
+      geom_vline(xintercept = 0) + #y axis
+      geom_hline(yintercept = 0) + #z axis
+      geom_polygon(data=triangles, mapping=aes(x=x, y=y, group=t, fill = t), alpha=0.8) + #areas for metabolism
+      geom_abline(slope = one_to_one_slope, intercept = 0, color = "grey") + #1:1 line
+      geom_abline(slope = two_to_one_slope, intercept = 0, color = "grey") + #2:1 line
+      geom_vline(xintercept = C2_LOD, color = "grey", linetype = "dashed") + #x LOD
+      geom_hline(yintercept = N_LOD, color = "grey", linetype = "dashed") + #y LOD
+      geom_point(data = temp_df, aes(x=C2_net, y=N_net), shape =1) +
+      theme_bw() +
+      scale_x_continuous(name = expression("C"["net"]*"%"), limits=c(-C2_LOD,x_lim), expand = c(0.01, 0)) +
+      scale_y_continuous(name = expression("N"["net"]*"%"), limits=c(-N_LOD,y_lim), expand = c(0.01, 0)) +
+      theme(panel.grid.major.x = element_blank(),
+            panel.grid.major.y = element_blank(),
+            panel.grid.minor.x = element_blank(),
+            panel.grid.minor.y = element_blank(),
+            axis.text=element_text(size=12),
+            axis.title=element_text(size=14,face="bold"),
+            plot.title = element_text(size=22, face="bold"),
+            legend.key = element_rect(color="black")) + 
+      ggtitle(label) +
+      scale_fill_manual(values=c(brewer.pal(6, "PRGn")[2:5], "white"), name = '', 
+          labels = c("heterotrophy, 100% of new C from organic sources", "heterotrophy, >50% of new C from organic sources", "autotrophy, >50% of new C from bicarbonate", "autotrophy, 100% of new C from bicarbonate", "inactivity, no enrichment"))
+  
+  #Save as pdf
+  ggsave(plot=p, height=4.5, width=7.5, filename=paste(label, "CnetVsNnet_scatter.pdf", sep="_"), useDingbats=FALSE)
+  
+  
+  ########
+  #Make a pie chart of all metabolisms
+  temp_df = data.frame(temp_df,
+                       metabolism = NA)
+  
+  #Assign the metabolisms
+  temp_df$metabolism[temp_df$C2_net<=C2_LOD & temp_df$N_net>N_LOD] = "1_heterotrophy"
+  #a = rownames(temp_df)[temp_df$metabolism=="1_heterotrophy"]
+  temp_df$metabolism[temp_df$C2_net>C2_LOD & temp_df$N_net>N_LOD & temp_df$N_net>2*temp_df$C2_net] = "2_mostly_heterotrophy"
+    #b = rownames(temp_df)[temp_df$metabolism=="2_mostly_heterotrophy"]
+  temp_df$metabolism[temp_df$C2_net>C2_LOD & temp_df$N_net>N_LOD & temp_df$N_net<=2*temp_df$C2_net & temp_df$N_net>temp_df$C2_net] = "3_mostly_autotrophy"
+    #c = rownames(temp_df)[temp_df$metabolism=="3_mostly_autotrophy"]
+  temp_df$metabolism[temp_df$C2_net>C2_LOD & temp_df$N_net<=temp_df$C2_net] = "4_autotrophy"
+    #d = rownames(temp_df)[temp_df$metabolism=="4_autotrophy"]
+  temp_df$metabolism[temp_df$C2_net<=C2_LOD & temp_df$N_net<=N_LOD] = "5_not_enriched"
+    #e = rownames(temp_df)[temp_df$metabolism=="5_not_enriched"]
+    #d %in% e
+    
+    #Collate the data
+  metabolism_df = data.frame(metabolism = c("1_heterotrophy", "2_mostly_heterotrophy", "3_mostly_autotrophy", "4_autotrophy", "5_not_enriched"),
+                             number_ROIs = c(
+                                length(which(temp_df$metabolism=="1_heterotrophy")),
+                                length(which(temp_df$metabolism=="2_mostly_heterotrophy")),
+                                length(which(temp_df$metabolism=="3_mostly_autotrophy")),
+                                length(which(temp_df$metabolism=="4_autotrophy")),
+                                length(which(temp_df$metabolism=="5_not_enriched"))
+                                )
+                     )
+  #Calculate the percentages
+  metabolism_df = data.frame(metabolism_df,
+                             percent = metabolism_df$number_ROIs/sum(metabolism_df$number_ROIs)*100
+                             )
+
+  # Get the positions for the % labels, outside of pie
+  df_labels <- metabolism_df %>% 
+    mutate(csum = rev(cumsum(rev(percent))), 
+           pos = percent/2 + lead(csum, 1),
+           pos = if_else(is.na(pos), percent/2, pos))
+
+  #Make the pie plot
+  func_pie = function(data){
+    ggplot(data=data, aes(x="", y=percent, fill=metabolism)) +
+      geom_bar(stat="identity", width=1, color="black") +
+      coord_polar("y", start=0) +
+      scale_fill_manual(values=c(brewer.pal(6, "PRGn")[2:5], "white"), name = '', 
+          labels = c("heterotrophy, 100% of new C from organic sources", "heterotrophy, >50% of new C from organic sources", "autotrophy, >50% of new C from bicarbonate", "autotrophy, 100% of new C from bicarbonate", "inactivity, no enrichment")) + #choose the colors that match the scatter plot
+      theme_void() + #remove labels
+      geom_label_repel(data = df_labels,
+                     aes(y = pos, label = paste0(round(percent), "%")),
+                     size = 4.5, nudge_x = 1, show.legend = FALSE) +
+      labs(tag = paste("n = ", sum(metabolism_df$number_ROIs), sep="")) +
+      theme(plot.tag.position = c(0.15, 0.02))
+  }
+  
+  p2 = func_pie(metabolism_df)
+   
+  #Save as pdf
+  ggsave(plot=p2, height=4.5, width=6, filename=paste(label, "metabolism_pie.pdf", sep="_"), useDingbats=FALSE)     
+  
+  
+  ########
+  #Make a pie chart of all metabolisms, only of active cells
+  #Remove the cells without enrichment
+  metabolism_active_df = data.frame(metabolism_df[metabolism_df$metabolism!="5_not_enriched",])
+  
+  #Re-calculate the percentages
+    metabolism_active_df$percent = metabolism_active_df$number_ROIs/sum(metabolism_active_df$number_ROIs)*100
+
+  # Get the positions for the % labels, outside of pie
+  df_labels <- metabolism_active_df %>% 
+    mutate(csum = rev(cumsum(rev(percent))), 
+           pos = percent/2 + lead(csum, 1),
+           pos = if_else(is.na(pos), percent/2, pos))
+
+  #Make the pie plot
+  p3 = func_pie(metabolism_active_df)
+   
+  #Save as pdf
+  ggsave(plot=p3, height=4.5, width=6, filename=paste(label, "metabolism_onlyActive_pie.pdf", sep="_"), useDingbats=FALSE)     
+}
+```
+
+
+
+Using the function to plot C vs N for amm + bicarb in at%
+!!!!Note the x_lim and y_lim need to be the same!!!
+```{r}
+#Mvent, t=2
+func_CnetVsNnet(C2_data_tf = Mvent.amm_bicarb.2.ROI.list.atPerc.highPEremoved.C2, N_data_tf =Mvent.amm_bicarb.2.ROI.list.atPerc.highPEremoved.N, C2_data_t0=Mvent.no_label.0.ROI.list.atPerc.highPEremoved.C2, N_data_t0=Mvent.no_label.0.ROI.list.atPerc.highPEremoved.N, label="Mvent_t2_removedROIsbyPE", C2_atPerc_add=bicarb.label.atPerc, N_atPerc_add=99, x_lim=3, y_lim=3)
+#lim of 10 is good
+
+#Mvent, t=7
+func_CnetVsNnet(C2_data_tf = Mvent.amm_bicarb.7.ROI.list.atPerc.highPEremoved.C2, N_data_tf=Mvent.amm_bicarb.7.ROI.list.atPerc.highPEremoved.N,C2_data_t0=Mvent.no_label.0.ROI.list.atPerc.highPEremoved.C2, N_data_t0=Mvent.no_label.0.ROI.list.atPerc.highPEremoved.N, label="Mvent_t7_removedROIsbyPE", C2_atPerc_add=bicarb.label.atPerc, N_atPerc_add=99, x_lim=3, y_lim=3)
+#lim of 20 is good
+
+#AlvRock, t=2
+func_CnetVsNnet(C2_data_tf = AlvRock.amm_bicarb.2.ROI.list.atPerc.highPEremoved.C2, N_data_tf =AlvRock.amm_bicarb.2.ROI.list.atPerc.highPEremoved.N, C2_data_t0=AlvRock.no_label.0.ROI.list.atPerc.highPEremoved.C2, N_data_t0=AlvRock.no_label.0.ROI.list.atPerc.highPEremoved.N, label="AlvRock_t2_removedROIsbyPE", C2_atPerc_add=bicarb.label.atPerc, N_atPerc_add=99, x_lim=3, y_lim=3)
+#lim of 30 is good
+
+#AlvRock, t=7
+func_CnetVsNnet(C2_data_tf = AlvRock.amm_bicarb.7.ROI.list.atPerc.highPEremoved.C2, N_data_tf =AlvRock.amm_bicarb.7.ROI.list.atPerc.highPEremoved.N, C2_data_t0=AlvRock.no_label.0.ROI.list.atPerc.highPEremoved.C2, N_data_t0=AlvRock.no_label.0.ROI.list.atPerc.highPEremoved.N, label="AlvRock_t7_removedROIsbyPE", C2_atPerc_add=bicarb.label.atPerc, N_atPerc_add=99, x_lim=30, y_lim=30)
+#lim of 30 is good
+```
+
+
+
+
+
+Calculate % active cells. Using 3*SD
+```{r}
+perc_active_summary = data.frame(t0_atPerc_mean = rep(NA, 3),
+                                 t0_atPerc_sd = rep(NA, 3),
+                                 t0_n = rep(NA, 3),
+                                 LOD = rep(NA, 3),
+                                 tf_n = rep(NA, 3),
+                                 perc_active = rep(NA, 3)
+                                 )
+
+rownames(perc_active_summary) = element_list
+
+func_perc_active = function(site, time, amendment) {
+  #site is "AlvRock" or "Mvent"
+  #time is 2 or 7
+  #amendment is "amm_bicarb" or "acet"
+  
+  #NA the summary table
+  perc_active_summary[,] = NA
+      
+   for (element.no in 1:length(element_list)) {
+
+      #Get the t0 ROI list. Using the list where the ROI's with high PE were removed.
+      t0_ROI_list = get(paste(site, "no_label", "0.ROI.list.atPerc.highPEremoved", element_list[element.no], sep="."))
+      
+      #Get the tf ROI list. Using the list where the ROI's with high PE were removed.
+      tf_ROI_list = get(paste(site, amendment, time, "ROI.list.atPerc.highPEremoved", element_list[element.no], sep="."))
+
+      #mean of t0
+      perc_active_summary[element.no, 1] = mean(t0_ROI_list, na.rm = TRUE)
+      
+      #sd of t0
+      perc_active_summary[element.no, 2] = sd(t0_ROI_list, na.rm = TRUE)
+      
+      #number of ROI's for t0
+      true_false = !is.na(t0_ROI_list)
+      perc_active_summary[element.no, 3] = sum(true_false)      
+      
+      #limit of detection is mean + 3*SD of t0
+      perc_active_summary[element.no, 4] = mean(t0_ROI_list, na.rm = TRUE) + 3*sd(t0_ROI_list, na.rm = TRUE)
+      
+      #number of cells in tf
+      true_false = !is.na(tf_ROI_list)
+      perc_active_summary[element.no, 5] = sum(true_false)    
+      
+      #percent active
+      true_false = tf_ROI_list>perc_active_summary[element.no, 4]
+      no_active_cells = sum(true_false, na.rm=TRUE)
+      perc_active_summary[element.no, 6] = no_active_cells/perc_active_summary[element.no, 5]*100
+      
+   } #end of element.no for loop
+  
+    #Save the summary table in the global environment
+    var_name = paste(site, amendment, time, "percActiveCells", sep=".")
+    assign(var_name, perc_active_summary, envir = .GlobalEnv)
+}
+
+#using the percent active function
+func_perc_active("Mvent", 2, "amm_bicarb")
+func_perc_active("Mvent", 7, "amm_bicarb")
+func_perc_active("Mvent", 2, "acet")
+func_perc_active("Mvent", 7, "acet")
+func_perc_active("AlvRock", 2, "amm_bicarb")
+func_perc_active("AlvRock", 7, "amm_bicarb")
+func_perc_active("AlvRock", 2, "acet")
+func_perc_active("AlvRock", 7, "acet")
+
+#combine all the data of perc active into 1 data frame
+summary_percActiveCells = data.frame(site = c(rep("Mvent", 4), rep("AlvRock", 4)),
+                                    amendment = rep(c(rep("amm_bicarb", 2), rep("acet", 2)), 2),
+                                    time = rep(c(2, 7), 4),
+                                    LOD_atPerc = NA,
+                                    tf_n = NA,
+                                    perc_active = NA
+                                    )
+
+func_perc_active_summary = function(element) {
+  #NA the summary data frame
+  summary_percActiveCells[,4:6] = NA
+  
+  #Get the correct row number
+  target.row.no = which(element_list==element)
+  
+  for (row.no in 1:nrow(summary_percActiveCells)){
+    site = summary_percActiveCells[row.no, 1]
+    amendment = summary_percActiveCells[row.no, 2]
+    time = summary_percActiveCells[row.no, 3]
+    
+    #Get the percent active data frame for the target site, amendment, time
+    var_name = paste(site, amendment, time, "percActiveCells", sep=".")
+    temp_df = get(var_name)
+    
+    #fill in the summary data frame with the LOD
+    summary_percActiveCells[row.no, 4] = temp_df[target.row.no, which(colnames(temp_df)=="LOD")]
+    
+    #fill in the summary data frame with the number of ROI's for tf
+    summary_percActiveCells[row.no, 5] = temp_df[target.row.no, which(colnames(temp_df)=="tf_n")]
+    
+    #fill in the summary data frame with the percent active ROI's
+    summary_percActiveCells[row.no, 6] = temp_df[target.row.no, which(colnames(temp_df)=="perc_active")]    
+    
+  }#end of for loop
+  
+    var_name = paste("summary_percActiveCells", element, sep=".")
+    assign(var_name, summary_percActiveCells, envir = .GlobalEnv)
+} #end of function
+
+#Using the function, cycling through the 3 elements
+for (element.no in 1:length(element_list)) {
+  func_perc_active_summary(element = element_list[element.no])
+}
+```
+
+
+
+
+
+
+
+
+
